@@ -4,11 +4,45 @@ import pandas as pd
 import plotly.graph_objs as go
 import requests
 from datetime import datetime
-from io import StringIO
 
 # -------------------------------
-# Helper Functions
+# Helper functions
 # -------------------------------
+
+@st.cache_data
+def get_nifty500_tickers():
+    """Fetch Nifty 500 tickers dynamically from NSE website"""
+    url = "https://www.nseindia.com/api/allIndices"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    try:
+        resp = session.get(url)
+        data = resp.json()
+        nifty_500 = []
+        names = []
+        for idx in data["data"]:
+            if "Nifty 500" in idx["index"]:
+                for stock in idx["stocks"]:
+                    nifty_500.append(stock["symbol"] + ".NS")
+                    names.append(stock["name"])
+        return nifty_500, names
+    except:
+        # fallback small list
+        return ["RELIANCE.NS","TCS.NS","INFY.NS"], ["Reliance","TCS","Infosys"]
+
+def get_news(ticker):
+    """Fetch latest news using Yahoo Finance API (fallback to simple HTML links)."""
+    try:
+        stock = yf.Ticker(ticker)
+        news_items = stock.news[:5] if hasattr(stock, "news") else []
+        return news_items
+    except:
+        return []
 
 def human_readable(num):
     if num is None: return "—"
@@ -18,51 +52,23 @@ def human_readable(num):
         num /= 1000.0
     return f"{num:.1f}T"
 
-def get_news(ticker):
-    """Fetch latest news using Yahoo Finance API."""
-    try:
-        stock = yf.Ticker(ticker)
-        news_items = stock.news[:5] if hasattr(stock, "news") else []
-        return news_items
-    except:
-        return []
-
-# -------------------------------
-# Fetch Nifty 500 dynamically
-# -------------------------------
-@st.cache(allow_output_mutation=True)
-def get_nifty500_tickers():
-    url = "https://www1.nseindia.com/content/indices/ind_nifty500list.csv"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-        "Referer": "https://www.nseindia.com/"
-    }
-    resp = requests.get(url, headers=headers, verify=False)  # SSL workaround
-    resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text))
-    tickers = [f"{s}.NS" for s in df['Symbol']]
-    names = df['Company Name'].tolist()
-    return tickers, names
-
 # -------------------------------
 # Streamlit UI
 # -------------------------------
 
 st.set_page_config(page_title="Stock Monitoring Platform", layout="wide")
-st.markdown("<h1 style='text-align:center'>📈 Stock Monitoring Platform</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center'>📊 Stock Monitoring Platform</h1>", unsafe_allow_html=True)
 
-# Get Nifty 500
+# Get Nifty 500 tickers
 tickers, names = get_nifty500_tickers()
-ticker_map = dict(zip(names, tickers))
-selected_name = st.selectbox("Select Stock (Nifty 500):", options=names)
-ticker = ticker_map[selected_name]
+ticker_dict = dict(zip(names, tickers))
+selected_name = st.selectbox("Select Stock:", options=names)
+ticker = ticker_dict[selected_name]
 
 stock = yf.Ticker(ticker)
 info = stock.info
 
-# Company Info
+# Company info + logo
 col1, col2 = st.columns([1,4])
 with col1:
     if "logo_url" in info and info["logo_url"]:
@@ -77,7 +83,7 @@ col2.metric("P/E Ratio", round(info.get("trailingPE", 0), 2))
 col3.metric("Dividend Yield", f"{round(info.get('dividendYield',0)*100,2)}%")
 col4.metric("Beta", round(info.get("beta", 0), 2))
 
-# Tabs
+# Navigation tabs
 tabs = st.tabs(["Overview", "Financials", "Technicals", "News"])
 
 # -------------------------------
@@ -90,8 +96,10 @@ with tabs[0]:
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=hist.index, open=hist["Open"], high=hist["High"],
-        low=hist["Low"], close=hist["Close"], name="Candlestick"))
+        x=hist.index,
+        open=hist["Open"], high=hist["High"],
+        low=hist["Low"], close=hist["Close"],
+        name="Candlestick"))
     st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------
@@ -99,6 +107,7 @@ with tabs[0]:
 # -------------------------------
 with tabs[1]:
     st.subheader("📊 Financial Performance")
+
     fin = stock.financials.T
     if not fin.empty:
         st.write("### Income Statement (Last Years)")
