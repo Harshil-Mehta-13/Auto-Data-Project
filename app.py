@@ -1,20 +1,22 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
 import plotly.graph_objects as go
 
 # ===============================
-# Function to fetch NIFTY 500 tickers from NSE
+# Function to fetch NIFTY 500 tickers from NSE CSV
 # ===============================
 @st.cache_data
 def get_nifty500_tickers():
-    url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    session = requests.Session()
-    data = session.get(url, headers=headers).json()
-    tickers = [stock["symbol"] + ".NS" for stock in data["data"]]
-    return tickers
+    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+    try:
+        df = pd.read_csv(url)
+        df = df.rename(columns=lambda x: x.strip())
+        tickers = df["Symbol"].dropna().astype(str).tolist()
+        return [t + ".NS" for t in tickers]  # append .NS for Yahoo Finance
+    except Exception as e:
+        st.error(f"Failed to load NIFTY 500 list: {e}")
+        return ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
 
 # ===============================
 # Function to fetch live stock data
