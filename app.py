@@ -1,96 +1,97 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-import plotly.graph_objects as go
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
-# ===============================
-# Function to fetch NIFTY 500 tickers from NSE CSV
-# ===============================
+# -------------------------------------------
+# Fetch Nifty 500 stock tickers
+# -------------------------------------------
 @st.cache_data
-def get_nifty500_tickers():
-    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-    try:
-        df = pd.read_csv(url)
-        df = df.rename(columns=lambda x: x.strip())
-        tickers = df["Symbol"].dropna().astype(str).tolist()
-        return [t + ".NS" for t in tickers]  # append .NS for Yahoo Finance
-    except Exception as e:
-        st.error(f"Failed to load NIFTY 500 list: {e}")
-        return ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
+def get_nifty500_stocks():
+    url = "https://en.wikipedia.org/wiki/NIFTY_500"
+    tables = pd.read_html(url)
+    df = tables[1]  # The table containing company list
+    return df['Symbol'].tolist()
 
-# ===============================
-# Function to fetch live stock data
-# ===============================
-def get_stock_data(ticker):
-    stock = yf.Ticker(ticker)
-    hist = stock.history(period="6mo", interval="1d")
-    return hist
+nifty_500_stocks = get_nifty500_stocks()
 
-# ===============================
-# Function to calculate portfolio performance
-# ===============================
-def calculate_portfolio(df):
-    results = []
-    for _, row in df.iterrows():
-        ticker = row["Ticker"]
-        qty = row["Quantity"]
-        avg_price = row["Avg Price"]
+# -------------------------------------------
+# App Layout
+# -------------------------------------------
+st.set_page_config(page_title="Stock Analysis App", layout="wide")
+st.title("📈 Nifty 500 Stock Analysis Dashboard")
 
-        try:
-            stock = yf.Ticker(ticker)
-            live_price = stock.history(period="1d")["Close"].iloc[-1]
-            invested = avg_price * qty
-            current_value = live_price * qty
-            pnl = current_value - invested
-            results.append([ticker, avg_price, qty, live_price, invested, current_value, pnl])
-        except Exception:
-            continue
+# Sidebar for stock selection
+stock = st.sidebar.selectbox("Select a Stock", nifty_500_stocks)
 
-    return pd.DataFrame(results, columns=["Ticker", "Avg Price", "Quantity", "Live Price", "Invested", "Current Value", "P&L"])
+# Download stock data
+ticker = yf.Ticker(stock + ".NS") if not stock.endswith(".NS") else yf.Ticker(stock)
 
-# ===============================
-# Streamlit UI
-# ===============================
-st.set_page_config(page_title="Stock Portfolio Tracker", layout="wide")
-st.title("📈 Stock Portfolio Tracker")
+# -------------------------------------------
+# Stock Price Chart
+# -------------------------------------------
+st.subheader(f"Stock Price - {stock}")
+period = st.selectbox("Select Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
+interval = st.selectbox("Select Interval", ["1d", "1wk", "1mo"], index=0)
 
-# Fetch NIFTY 500 tickers
-nifty_500_stocks = get_nifty500_tickers()
-st.sidebar.success(f"✅ Loaded {len(nifty_500_stocks)} NIFTY 500 tickers")
+data = ticker.history(period=period, interval=interval)
+st.line_chart(data['Close'])
 
-# Upload portfolio Excel
-uploaded_file = st.file_uploader("Upload Portfolio Excel (Ticker, Avg Price, Quantity)", type=["xlsx"])
-if uploaded_file:
-    portfolio_df = pd.read_excel(uploaded_file)
+# -------------------------------------------
+# Company Financials
+# -------------------------------------------
+st.subheader("📊 Company Financials")
+try:
+    fin = ticker.financials
+    bs = ticker.balance_sheet
+    cf = ticker.cashflow
+    st.write("### Income Statement")
+    st.dataframe(fin)
+    st.write("### Balance Sheet")
+    st.dataframe(bs)
+    st.write("### Cash Flow")
+    st.dataframe(cf)
+except Exception as e:
+    st.warning("Financial data not available.")
 
-    # Calculate performance
-    result_df = calculate_portfolio(portfolio_df)
+# -------------------------------------------
+# Technical Indicators
+# -------------------------------------------
+st.subheader("📈 Technical Analysis")
 
-    st.subheader("📊 Portfolio Summary")
-    st.dataframe(result_df, use_container_width=True)
+def calculate_technical_indicators(data):
+    df = data.copy()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['SMA50'] = df['Close'].rolling(window=50).mean()
+    df['RSI'] = 100 - (100 / (1 + df['Close'].pct_change().rolling(14).apply(
+        lambda x: (x[x > 0].mean() / (-x[x < 0].mean())) if (-x[x < 0].mean()) != 0 else 0)))
+    return df
 
-    total_invested = result_df["Invested"].sum()
-    total_value = result_df["Current Value"].sum()
-    total_pnl = result_df["P&L"].sum()
+data_ta = calculate_technical_indicators(data)
+st.line_chart(data_ta[['Close', 'SMA20', 'SMA50']])
+st.write("Latest RSI:", round(data_ta['RSI'].iloc[-1], 2))
 
-    st.metric("💰 Total Invested", f"₹{total_invested:,.2f}")
-    st.metric("📈 Current Value", f"₹{total_value:,.2f}")
-    st.metric("🔄 P&L", f"₹{total_pnl:,.2f}")
+# -------------------------------------------
+# News Section (Free Source)
+# -------------------------------------------
+st.subheader("📰 Latest News")
 
-    # Stock chart
-    st.subheader("📉 Stock Chart")
-    selected_stock = st.selectbox("Choose a stock", result_df["Ticker"].unique())
+def get_news(query):
+    url = f"https://news.google.com/rss/search?q={query}+stock+India"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, "xml")
+    items = soup.find_all("item")[:5]
+    news_list = []
+    for item in items:
+        news_list.append({
+            "title": item.title.text,
+            "link": item.link.text,
+            "pubDate": item.pubDate.text
+        })
+    return news_list
 
-    if selected_stock:
-        hist_data = get_stock_data(selected_stock)
-        fig = go.Figure(data=[go.Candlestick(
-            x=hist_data.index,
-            open=hist_data['Open'],
-            high=hist_data['High'],
-            low=hist_data['Low'],
-            close=hist_data['Close']
-        )])
-        fig.update_layout(title=f"{selected_stock} - Price Chart", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("📤 Please upload your portfolio Excel file to begin.")
+news = get_news(stock)
+for n in news:
+    st.markdown(f"- [{n['title']}]({n['link']}) ({n['pubDate']})")
