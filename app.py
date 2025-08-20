@@ -7,10 +7,8 @@ from datetime import datetime
 # -------------------------------
 # Helper functions
 # -------------------------------
-
 @st.cache_data
 def get_nifty500_tickers():
-    """Fetch Nifty 500 tickers dynamically from NSE India."""
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     df = pd.read_csv(url)
     tickers = [symbol + ".NS" for symbol in df['Symbol']]
@@ -28,13 +26,11 @@ def human_readable(num):
 # -------------------------------
 # Streamlit UI
 # -------------------------------
-
 st.set_page_config(page_title="Stock Monitoring Platform", layout="wide")
 st.markdown("<h1 style='text-align:center;'>📊 Stock Monitoring Platform</h1>", unsafe_allow_html=True)
 
 # Fetch tickers
 tickers, names = get_nifty500_tickers()
-
 ticker_idx = st.selectbox(
     "Select Stock (Nifty 500):",
     options=range(len(tickers)),
@@ -51,7 +47,6 @@ with col1:
         st.image(info["logo_url"], width=80)
 with col2:
     st.subheader(info.get("shortName", ticker))
-    # Small company description
     st.markdown(info.get("longBusinessSummary", "Description not available.")[:250] + "...")
 
 # KPIs
@@ -68,17 +63,33 @@ tabs = st.tabs(["Overview", "Financials", "Technicals"])
 # Overview Tab
 # -------------------------------
 with tabs[0]:
-    st.subheader("Stock Price History (1 Year)")
+    st.subheader("📈 Stock Price History (1 Year)")
     hist = stock.history(period="1y")
     hist = hist[hist.index.dayofweek < 5]  # drop weekends
 
+    chart_type = st.selectbox("Chart Type:", ["Candlestick", "Line"])
+    show_sma = st.checkbox("Show SMA20/SMA50")
+
+    if show_sma:
+        hist["SMA20"] = hist["Close"].rolling(20).mean()
+        hist["SMA50"] = hist["Close"].rolling(50).mean()
+
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=hist.index,
-        open=hist["Open"], high=hist["High"],
-        low=hist["Low"], close=hist["Close"],
-        name="Candlestick"
-    ))
+    if chart_type == "Candlestick":
+        fig.add_trace(go.Candlestick(
+            x=hist.index,
+            open=hist["Open"], high=hist["High"],
+            low=hist["Low"], close=hist["Close"],
+            name="Candlestick"
+        ))
+    else:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], mode="lines", name="Close"))
+
+    if show_sma:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["SMA20"], mode="lines", name="SMA20"))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["SMA50"], mode="lines", name="SMA50"))
+
+    fig.update_layout(xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------
@@ -91,43 +102,43 @@ with tabs[1]:
     bal = stock.balance_sheet.T
     cf = stock.cashflow.T
 
-    # Revenue & Net Income chart
+    # Income Statement charts
     if not fin.empty:
+        metrics = ["Total Revenue", "Gross Profit", "Operating Income", "Net Income"]
         fig = go.Figure()
-        if "Total Revenue" in fin.columns:
-            fig.add_trace(go.Bar(x=fin.index, y=fin["Total Revenue"], name="Revenue"))
-        if "Net Income" in fin.columns:
-            fig.add_trace(go.Bar(x=fin.index, y=fin["Net Income"], name="Net Income"))
+        for metric in metrics:
+            if metric in fin.columns:
+                fig.add_trace(go.Bar(x=fin.index, y=fin[metric], name=metric))
         fig.update_layout(
-            title="Revenue & Net Income",
+            title="Income Statement Overview",
             xaxis_title="Year",
             yaxis_title="Amount",
             barmode="group"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Assets & Liabilities chart
+    # Balance Sheet charts
     if not bal.empty:
+        metrics = ["Total Assets", "Total Liab", "Total Stockholder Equity"]
         fig = go.Figure()
-        if "Total Assets" in bal.columns:
-            fig.add_trace(go.Bar(x=bal.index, y=bal["Total Assets"], name="Total Assets"))
-        if "Total Liab" in bal.columns:
-            fig.add_trace(go.Bar(x=bal.index, y=bal["Total Liab"], name="Total Liabilities"))
+        for metric in metrics:
+            if metric in bal.columns:
+                fig.add_trace(go.Bar(x=bal.index, y=bal[metric], name=metric))
         fig.update_layout(
-            title="Assets vs Liabilities",
+            title="Balance Sheet Overview",
             xaxis_title="Year",
             yaxis_title="Amount",
             barmode="group"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Cashflow chart
+    # Cashflow charts
     if not cf.empty:
+        metrics = ["Total Cash From Operating Activities", "Capital Expenditures", "Total Cash From Financing Activities"]
         fig = go.Figure()
-        if "Total Cash From Operating Activities" in cf.columns:
-            fig.add_trace(go.Bar(x=cf.index, y=cf["Total Cash From Operating Activities"], name="Operating Cashflow"))
-        if "Capital Expenditures" in cf.columns:
-            fig.add_trace(go.Bar(x=cf.index, y=cf["Capital Expenditures"], name="Capital Expenditure"))
+        for metric in metrics:
+            if metric in cf.columns:
+                fig.add_trace(go.Bar(x=cf.index, y=cf[metric], name=metric))
         fig.update_layout(
             title="Cashflow Overview",
             xaxis_title="Year",
@@ -140,7 +151,7 @@ with tabs[1]:
 # Technicals Tab
 # -------------------------------
 with tabs[2]:
-    st.subheader("📈 Technical Analysis")
+    st.subheader("📊 Technical Analysis")
     hist = stock.history(period="1y")
     hist = hist[hist.index.dayofweek < 5]
 
