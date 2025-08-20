@@ -36,11 +36,47 @@ def fmt_currency(x: float, symbol: str = "₹"):
 
 @st.cache_data(show_spinner=False)
 def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+    """
+    Download price history and normalize column names.
+
+    Handles:
+    - MultiIndex columns returned by yfinance (e.g. for multiple tickers)
+    - Non-string column labels (avoids calling .capitalize() on tuples)
+    - Maps common OHLCV labels to predictable column names:
+      'Open','High','Low','Close','Adj Close','Volume'
+    """
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
-    # Ensure expected columns
     if df is None or df.empty:
         return pd.DataFrame()
-    df = df.rename(columns={c: c.capitalize() for c in df.columns})
+
+    # Flatten MultiIndex columns and coerce to strings, then map to standard names
+    cols = []
+    for c in df.columns:
+        # If the column is a tuple (MultiIndex), join the parts
+        if isinstance(c, tuple):
+            s = " ".join([str(x) for x in c if x is not None]).strip()
+        else:
+            s = str(c)
+        s_low = s.lower()
+
+        if "open" in s_low and s_low.strip().startswith("open"):
+            new = "Open"
+        elif "high" in s_low:
+            new = "High"
+        elif "low" in s_low and "adj" not in s_low:
+            new = "Low"
+        elif "adj" in s_low and "close" in s_low:
+            new = "Adj Close"
+        elif "close" in s_low:
+            new = "Close"
+        elif "volume" in s_low:
+            new = "Volume"
+        else:
+            # fallback: keep original string (trimmed)
+            new = s
+        cols.append(new)
+
+    df.columns = cols
     return df
 
 @st.cache_data(show_spinner=False)
