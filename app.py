@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objs as go
 import requests
+from io import StringIO
 
 # -------------------------------
 # Helper functions
@@ -13,7 +14,9 @@ def get_nifty500_tickers():
     """Fetch Nifty 500 tickers dynamically from NSE"""
     url = "https://www1.nseindia.com/content/indices/ind_nifty500list.csv"
     headers = {"User-Agent": "Mozilla/5.0"}
-    df = pd.read_csv(url, headers=headers)
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()  # raise error if request fails
+    df = pd.read_csv(StringIO(resp.text))
     tickers = [f"{s}.NS" for s in df['Symbol']]
     names = df['Company Name'].tolist() if 'Company Name' in df.columns else tickers
     return tickers, names
@@ -35,22 +38,6 @@ def human_readable(num):
         num /= 1000.0
     return f"{num:.1f}T"
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
-
-st.set_page_config(page_title="Nifty 500 Dashboard", layout="wide")
-
-st.title("📊 Nifty 500 Stock Monitoring Platform")
-
-# Get Nifty 500 tickers dynamically
-tickers, names = get_nifty500_tickers()
-ticker_dict = dict(zip(names, tickers))
-
-selected_name = st.selectbox("Select Stock:", names)
-selected_ticker = ticker_dict[selected_name]
-
-# Fetch stock info and data
 @st.cache_data
 def load_data(ticker):
     stock = yf.Ticker(ticker)
@@ -58,11 +45,24 @@ def load_data(ticker):
     info = stock.info
     return stock, data, info
 
+# -------------------------------
+# Streamlit UI
+# -------------------------------
+
+st.set_page_config(page_title="Nifty 500 Dashboard", layout="wide")
+st.title("📊 Nifty 500 Stock Monitoring Platform")
+
+# Get Nifty 500 tickers
+tickers, names = get_nifty500_tickers()
+ticker_dict = dict(zip(names, tickers))
+
+selected_name = st.selectbox("Select Stock:", names)
+selected_ticker = ticker_dict[selected_name]
+
+# Load stock data
 stock, data, info = load_data(selected_ticker)
 
-# -------------------------------
-# Tabs for Navigation
-# -------------------------------
+# Tabs below ticker
 tabs = st.tabs(["Overview", "Financials", "Charts", "News"])
 
 # -------------------------------
@@ -75,7 +75,6 @@ with tabs[0]:
     col2.metric("Market Cap", human_readable(info.get('marketCap')))
     col3.metric("P/E Ratio", round(info.get('trailingPE', 0), 2))
     col4.metric("Beta", round(info.get('beta', 0), 2))
-
     st.write(info.get("longBusinessSummary", "No company summary available."))
 
 # -------------------------------
@@ -115,16 +114,18 @@ with tabs[2]:
         name='Price'
     ))
 
-    # Volume bars
-    fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume', opacity=0.3, marker_color='blue'))
-
     # SMA20 & SMA50
     data["SMA20"] = data["Close"].rolling(20).mean()
     data["SMA50"] = data["Close"].rolling(50).mean()
     fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], mode="lines", name="SMA20", line=dict(color="orange")))
     fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode="lines", name="SMA50", line=dict(color="green")))
 
-    fig.update_layout(title=f"{selected_ticker} Stock Price", template="plotly_white", xaxis_rangeslider_visible=False)
+    # Volume bars
+    fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume', opacity=0.3, marker_color='blue', yaxis='y2'))
+
+    fig.update_layout(title=f"{selected_ticker} Stock Price", template="plotly_white",
+                      xaxis_rangeslider_visible=False,
+                      yaxis2=dict(overlaying='y', side='right', showgrid=False, title='Volume'))
     st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------
