@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objs as go
-import requests
 from datetime import datetime
 
 # -------------------------------
@@ -17,19 +16,6 @@ def get_nifty500_tickers():
     tickers = [symbol + ".NS" for symbol in df['Symbol']]
     names = df['Company Name'].tolist()
     return tickers, names
-
-def get_news(ticker):
-    """Fetch latest news using Yahoo Finance API (safe access)."""
-    try:
-        stock = yf.Ticker(ticker)
-        news_items = stock.news[:10] if hasattr(stock, "news") else []
-        clean_news = []
-        for item in news_items:
-            if "title" in item and "link" in item:
-                clean_news.append(item)
-        return clean_news
-    except:
-        return []
 
 def human_readable(num):
     if num is None: return "—"
@@ -65,6 +51,8 @@ with col1:
         st.image(info["logo_url"], width=80)
 with col2:
     st.subheader(info.get("shortName", ticker))
+    # Small company description
+    st.markdown(info.get("longBusinessSummary", "Description not available.")[:250] + "...")
 
 # KPIs
 col1, col2, col3, col4 = st.columns(4)
@@ -74,7 +62,7 @@ col3.metric("Dividend Yield", f"{round(info.get('dividendYield',0)*100,2)}%")
 col4.metric("Beta", round(info.get("beta", 0), 2))
 
 # Tabs
-tabs = st.tabs(["Overview", "Financials", "Technicals", "News"])
+tabs = st.tabs(["Overview", "Financials", "Technicals"])
 
 # -------------------------------
 # Overview Tab
@@ -97,34 +85,56 @@ with tabs[0]:
 # Financials Tab
 # -------------------------------
 with tabs[1]:
-    st.subheader("📊 Financial Performance")
+    st.subheader("📊 Financial Performance Charts")
 
-    # Income Statement
     fin = stock.financials.T
-    if not fin.empty:
-        st.write("### Income Statement (Last Years)")
-        st.dataframe(fin)
+    bal = stock.balance_sheet.T
+    cf = stock.cashflow.T
 
-        # Plot Revenue & Net Income
+    # Revenue & Net Income chart
+    if not fin.empty:
         fig = go.Figure()
         if "Total Revenue" in fin.columns:
             fig.add_trace(go.Bar(x=fin.index, y=fin["Total Revenue"], name="Revenue"))
         if "Net Income" in fin.columns:
             fig.add_trace(go.Bar(x=fin.index, y=fin["Net Income"], name="Net Income"))
-        fig.update_layout(barmode="group")
+        fig.update_layout(
+            title="Revenue & Net Income",
+            xaxis_title="Year",
+            yaxis_title="Amount",
+            barmode="group"
+        )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Balance Sheet
-    bal = stock.balance_sheet.T
+    # Assets & Liabilities chart
     if not bal.empty:
-        st.write("### Balance Sheet")
-        st.dataframe(bal)
+        fig = go.Figure()
+        if "Total Assets" in bal.columns:
+            fig.add_trace(go.Bar(x=bal.index, y=bal["Total Assets"], name="Total Assets"))
+        if "Total Liab" in bal.columns:
+            fig.add_trace(go.Bar(x=bal.index, y=bal["Total Liab"], name="Total Liabilities"))
+        fig.update_layout(
+            title="Assets vs Liabilities",
+            xaxis_title="Year",
+            yaxis_title="Amount",
+            barmode="group"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Cashflow
-    cf = stock.cashflow.T
+    # Cashflow chart
     if not cf.empty:
-        st.write("### Cashflow Statement")
-        st.dataframe(cf)
+        fig = go.Figure()
+        if "Total Cash From Operating Activities" in cf.columns:
+            fig.add_trace(go.Bar(x=cf.index, y=cf["Total Cash From Operating Activities"], name="Operating Cashflow"))
+        if "Capital Expenditures" in cf.columns:
+            fig.add_trace(go.Bar(x=cf.index, y=cf["Capital Expenditures"], name="Capital Expenditure"))
+        fig.update_layout(
+            title="Cashflow Overview",
+            xaxis_title="Year",
+            yaxis_title="Amount",
+            barmode="group"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------
 # Technicals Tab
@@ -143,26 +153,3 @@ with tabs[2]:
     fig.add_trace(go.Scatter(x=hist.index, y=hist["SMA20"], mode="lines", name="SMA20"))
     fig.add_trace(go.Scatter(x=hist.index, y=hist["SMA50"], mode="lines", name="SMA50"))
     st.plotly_chart(fig, use_container_width=True)
-
-# -------------------------------
-# News Tab
-# -------------------------------
-with tabs[3]:
-    st.subheader("📰 Latest News")
-    news_items = get_news(ticker)
-    if news_items:
-        for item in news_items:
-            title = item.get("title")
-            link = item.get("link")
-            if not title or not link:
-                continue
-            col1, col2 = st.columns([1,5])
-            with col1:
-                thumbnail_url = item.get("thumbnail", {}).get("resolutions", [{}])[0].get("url")
-                if thumbnail_url:
-                    st.image(thumbnail_url, width=80)
-            with col2:
-                st.markdown(f"**[{title}]({link})**")
-                st.caption(item.get("publisher", ""))
-    else:
-        st.info("No news available.")
