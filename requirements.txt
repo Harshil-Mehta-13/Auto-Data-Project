@@ -1,4 +1,6 @@
 streamlit
-pandas
 yfinance
-openpyxl   # to read Excel
+pandas
+numpy
+plotly
+openpyxl
