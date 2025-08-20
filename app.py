@@ -11,9 +11,25 @@ from datetime import datetime, timedelta
 @st.cache_data
 def get_nifty500_stocks():
     url = "https://en.wikipedia.org/wiki/NIFTY_500"
-    tables = pd.read_html(url)  # needs lxml or html5lib installed
-    df = tables[1]  # the correct table on Wikipedia
-    return df['Symbol'].tolist()
+    tables = pd.read_html(url)
+    df = tables[1]  # The NIFTY 500 table is usually the second table
+
+    # Standardize column names
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # Try common column names for ticker
+    possible_cols = ["symbol", "ticker", "ticker symbol"]
+    col = None
+    for c in possible_cols:
+        if c in df.columns:
+            col = c
+            break
+
+    if col is None:
+        st.error("Could not find ticker column in NIFTY 500 table.")
+        return []
+
+    return df[col].dropna().astype(str).tolist()
 
 nifty_500_stocks = get_nifty500_stocks()
 
