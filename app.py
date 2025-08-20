@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 @st.cache_data
 def get_nifty500_stocks():
     url = "https://en.wikipedia.org/wiki/NIFTY_500"
-    tables = pd.read_html(url)
-    df = tables[1]  # The table containing company list
+    tables = pd.read_html(url)  # needs lxml or html5lib installed
+    df = tables[1]  # the correct table on Wikipedia
     return df['Symbol'].tolist()
 
 nifty_500_stocks = get_nifty500_stocks()
