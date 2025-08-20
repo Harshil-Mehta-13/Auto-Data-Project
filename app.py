@@ -1,54 +1,70 @@
 # app.py
-import io
-from datetime import datetime, timedelta
+# Streamlit NIFTY-500 stock dashboard
+# Requirements (requirements.txt): streamlit, pandas, numpy, yfinance, plotly, requests, beautifulsoup4, lxml, html5lib
 
+import io
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import yfinance as yf
-import requests
 from bs4 import BeautifulSoup
 
 # -------------------------
-# Helpers / Data fetchers
+# Utilities
 # -------------------------
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
+def human_readable(n):
+    """Turn large number into a compact string (K/M/B/T)."""
+    try:
+        n = float(n)
+    except Exception:
+        return n
+    abs_n = abs(n)
+    if abs_n < 1_000:
+        return f"{n:,.0f}"
+    for unit in ["K", "M", "B", "T"]:
+        n /= 1000.0
+        if abs(n) < 1000.0:
+            return f"{n:3.2f}{unit}"
+    return f"{n:.2f}P"
+
+# -------------------------
+# Data fetchers & processors
+# -------------------------
 @st.cache_data(ttl=60 * 60 * 24)  # refresh daily
 def get_nifty500_tickers():
     """
-    Try NSE official CSV first, fallback to Wikipedia parsing, then to a small builtin list.
-    Returns list of tickers *with* .NS suffix (for yfinance).
+    Try NSE official CSV first, fallback to Wikipedia, then to a small builtin list.
+    Returns a list of tickers WITH .NS suffix (for yfinance).
     """
-    # 1) official CSV
+    # 1) official CSV from NSE archives
     csv_url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
         resp = requests.get(csv_url, headers=HEADERS, timeout=8)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
-        # common column name 'Symbol'
-        if any(col.lower() == "symbol" for col in df.columns):
-            # Find 'Symbol' case-insensitively
-            sym_col = next(c for c in df.columns if c.lower() == "symbol")
+        # case-insensitive find Symbol column
+        sym_col = next((c for c in df.columns if str(c).strip().lower() == "symbol"), None)
+        if sym_col:
             syms = df[sym_col].dropna().astype(str).str.strip().tolist()
             syms = [s + ("" if s.endswith(".NS") else ".NS") for s in syms if s]
             if syms:
                 return syms
     except Exception:
-        # ignore and fallback
         pass
 
-    # 2) Try Wikipedia table (less official but often works)
+    # 2) fallback: Wikipedia NIFTY 500 table
     try:
         wiki = "https://en.wikipedia.org/wiki/NIFTY_500"
         tables = pd.read_html(wiki)
         if tables:
-            # pick the largest table (most rows)
-            df = max(tables, key=lambda t: t.shape[0])
+            df = max(tables, key=lambda t: t.shape[0])  # largest table
             cols = [str(c).strip().lower() for c in df.columns]
-            # look for likely column
             for candidate in ("symbol", "ticker", "ticker symbol", "code", "scrip"):
                 if candidate in cols:
                     sym_col = df.columns[cols.index(candidate)]
@@ -59,30 +75,33 @@ def get_nifty500_tickers():
     except Exception:
         pass
 
-    # 3) fallback small list
-    fallback = [
+    # 3) final fallback small list
+    return [
         "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
         "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS"
     ]
-    return fallback
 
 
 @st.cache_data(ttl=60 * 5)
 def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    """Download price history, normalize columns, return dataframe with standard OHLCV columns."""
+    """
+    Download price history and return DataFrame with a 'Date' column and standard OHLCV columns.
+    Returns empty DataFrame on failure.
+    """
     try:
         df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, threads=False)
-        # sometimes empty or MultiIndex columns — normalize
         if df is None or df.empty:
-            # try ticker.history fallback
+            # fallback using Ticker.history
             t = yf.Ticker(symbol)
             df = t.history(period=period, interval=interval)
             if df is None or df.empty:
                 return pd.DataFrame()
-        # flatten multiindex columns if any
+
+        # flatten MultiIndex columns if any
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [" ".join([str(x) for x in col if x is not None]).strip() for col in df.columns.values]
-        # normalize names to standard ones
+
+        # normalize column names
         cols_map = {}
         for c in df.columns:
             cl = str(c).lower()
@@ -101,12 +120,27 @@ def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d") 
             else:
                 cols_map[c] = c
         df = df.rename(columns=cols_map)
-        # ensure required columns exist
-        for req in ("Open", "High", "Low", "Close"):
-            if req not in df.columns:
-                return pd.DataFrame()
+
+        # make sure required columns exist
+        reqs = {"Open", "High", "Low", "Close"}
+        if not reqs.issubset(set(df.columns)):
+            return pd.DataFrame()
+
         df = df.reset_index()
-        # ensure datetime index column name 'Date' or 'ts'
+        # ensure a 'Date' column exists (some dataframes use 'index' or other names after reset)
+        if df.columns[0].lower() not in ("date", "datetime", "index"):
+            df.rename(columns={df.columns[0]: "Date"}, inplace=True)
+        else:
+            df.rename(columns={df.columns[0]: "Date"}, inplace=True)
+
+        # ensure numeric types
+        for col in ["Open", "High", "Low", "Close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "Volume" in df.columns:
+            df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+        else:
+            df["Volume"] = 0
+
         return df
     except Exception:
         return pd.DataFrame()
@@ -114,16 +148,14 @@ def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d") 
 
 @st.cache_data(ttl=60 * 60)
 def fetch_company_info(symbol: str) -> dict:
-    """Return Ticker.info with safe fallback."""
+    """Return selected fields from yfinance company info safely."""
     try:
         t = yf.Ticker(symbol)
         info = {}
         try:
-            info = t.get_info() if hasattr(t, "get_info") else t.info
+            info = t.get_info() if hasattr(t, "get_info") else getattr(t, "info", {}) or {}
         except Exception:
-            # older yfinance exposes .info
             info = getattr(t, "info", {}) or {}
-        # some quick important fields (safe)
         quick = {
             "shortName": info.get("shortName") or info.get("longName"),
             "currency": info.get("currency"),
@@ -149,7 +181,6 @@ def fetch_news(symbol_short: str):
         t = yf.Ticker(symbol_short)
         news = getattr(t, "news", None)
         if news:
-            # normalize
             out = []
             for n in news:
                 out.append({
@@ -162,7 +193,6 @@ def fetch_news(symbol_short: str):
     except Exception:
         pass
 
-    # fallback: Google News RSS
     try:
         q = f"{symbol_short} stock India"
         rss = f"https://news.google.com/rss/search?q={requests.utils.requote_uri(q)}&hl=en-IN&gl=IN&ceid=IN:en"
@@ -182,9 +212,6 @@ def fetch_news(symbol_short: str):
         return []
 
 
-# -------------------------
-# Technical calculations
-# -------------------------
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add SMA, EMA, RSI, MACD columns to the dataframe (expects 'Close' column)."""
     d = df.copy()
@@ -198,7 +225,7 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d["EMA20"] = close.ewm(span=20, adjust=False).mean()
     d["EMA50"] = close.ewm(span=50, adjust=False).mean()
 
-    # RSI (EWMA smoothing)
+    # RSI (EWMA)
     delta = close.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
@@ -218,7 +245,7 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------------
-# UI & Tabs
+# UI & Layout
 # -------------------------
 st.set_page_config(page_title="Nifty 500 — Stock Dashboard", layout="wide")
 st.title("📈 Nifty 500 Stock Dashboard")
@@ -226,18 +253,20 @@ st.title("📈 Nifty 500 Stock Dashboard")
 # master dropdown
 tickers = get_nifty500_tickers()
 st.sidebar.markdown("### Select stock (NIFTY 500)")
-# format for user: show without .NS when possible but keep underlying value full
+# Display cleaner tickers (without .NS) but keep underlying values
 options_display = [t[:-3] if t.endswith(".NS") else t for t in tickers]
-selected_display = st.sidebar.selectbox("Ticker", options_display, index=0, format_func=lambda x: x)
-# map back to yahoo symbol
-if selected_display.endswith(".NS"):
-    symbol = selected_display
-else:
-    symbol = selected_display + ".NS"  # default to NSE
-# short symbol without suffix for news/ticker object where needed
+selected_display = st.sidebar.selectbox("Ticker", options_display, index=0)
+symbol = selected_display if selected_display.endswith(".NS") else selected_display + ".NS"
 symbol_short = symbol.replace(".NS", "")
 
-# tabs
+# Preload some data (default)
+default_period = "6mo"
+default_interval = "1d"
+df = fetch_price_history(symbol, period=default_period, interval=default_interval)
+if not df.empty:
+    df = add_technical_indicators(df)
+
+# Tabs
 tab_overview, tab_chart, tab_fin, tab_tech, tab_news = st.tabs(
     ["Overview", "Chart", "Financials", "Technicals", "News"]
 )
@@ -257,55 +286,54 @@ with tab_overview:
 # Chart
 with tab_chart:
     st.header(f"{symbol_short} — Candlestick chart")
-    col1, col2, col3 = st.columns([2,1,1])
-    with col1:
+    c1, c2, c3 = st.columns([2,1,1])
+    with c1:
         period = st.selectbox("Period", ["1mo","3mo","6mo","1y","2y","5y","max"], index=2)
-    with col2:
+    with c2:
         interval = st.selectbox("Interval", ["1d","1wk","1mo"], index=0)
-    with col3:
+    with c3:
         show_sma = st.checkbox("Show SMA20/SMA50", True)
         show_ema = st.checkbox("Show EMA20/EMA50", False)
         show_rsi = st.checkbox("Show RSI(14)", False)
         show_macd = st.checkbox("Show MACD", False)
 
-    df = fetch_price_history(symbol, period=period, interval=interval)
-    if df.empty:
+    df_chart = fetch_price_history(symbol, period=period, interval=interval)
+    if df_chart.empty:
         st.warning("No price data available for this period/interval.")
     else:
-        df = add_technical_indicators(df)
-        # Plotly: candlestick + volume + optional RSI/MACD as subplots
+        df_chart = add_technical_indicators(df_chart)
+        # Plotly candlestick with volume and optional RSI/MACD
         rows = 2 + (1 if show_rsi else 0) + (1 if show_macd else 0)
-        specs = [[{"rowspan":1}], [{"rowspan":1}]]
-        # We'll create subplots manually with make_subplots
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.02,
-                            row_heights=[0.6, 0.2] + ([0.2] if show_rsi else []) + ([0.2] if show_macd else []))
+        row_heights = [0.6, 0.2] + ([0.2] if show_rsi else []) + ([0.2] if show_macd else [])
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=row_heights)
 
-        # Candlestick row 1
+        # Candlestick
         fig.add_trace(go.Candlestick(
-            x=df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"
+            x=df_chart['Date'], open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'],
+            name="Price"
         ), row=1, col=1)
 
-        if show_sma and "SMA20" in df.columns:
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['SMA20'], name="SMA20", line=dict(width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['SMA50'], name="SMA50", line=dict(width=1)), row=1, col=1)
-        if show_ema and "EMA20" in df.columns:
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['EMA20'], name="EMA20", line=dict(dash="dot", width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['EMA50'], name="EMA50", line=dict(dash="dot", width=1)), row=1, col=1)
+        # overlays
+        if show_sma:
+            if "SMA20" in df_chart.columns: fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['SMA20'], name="SMA20", line=dict(width=1)), row=1, col=1)
+            if "SMA50" in df_chart.columns: fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['SMA50'], name="SMA50", line=dict(width=1)), row=1, col=1)
+        if show_ema:
+            if "EMA20" in df_chart.columns: fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['EMA20'], name="EMA20", line=dict(dash="dot", width=1)), row=1, col=1)
+            if "EMA50" in df_chart.columns: fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['EMA50'], name="EMA50", line=dict(dash="dot", width=1)), row=1, col=1)
 
-        # Volume in row 2
-        fig.add_trace(go.Bar(x=df['Date'], y=df.get('Volume', 0), name="Volume", marker=dict(opacity=0.6)), row=2, col=1)
+        # Volume
+        fig.add_trace(go.Bar(x=df_chart['Date'], y=df_chart.get('Volume', 0), name="Volume", marker=dict(opacity=0.6)), row=2, col=1)
 
         cur_row = 3
         if show_rsi:
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['RSI14'], name="RSI(14)"), row=cur_row, col=1)
+            fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['RSI14'], name="RSI(14)"), row=cur_row, col=1)
             fig.add_hline(y=70, line_dash="dot", row=cur_row, col=1)
             fig.add_hline(y=30, line_dash="dot", row=cur_row, col=1)
             cur_row += 1
         if show_macd:
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['MACD'], name="MACD"), row=cur_row, col=1)
-            fig.add_trace(go.Scatter(x=df['Date'], y=df['MACD_signal'], name="MACD Signal"), row=cur_row, col=1)
-            fig.add_trace(go.Bar(x=df['Date'], y=df['MACD_hist'], name="MACD Hist"), row=cur_row, col=1)
+            fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['MACD'], name="MACD"), row=cur_row, col=1)
+            fig.add_trace(go.Scatter(x=df_chart['Date'], y=df_chart['MACD_signal'], name="MACD Signal"), row=cur_row, col=1)
+            fig.add_trace(go.Bar(x=df_chart['Date'], y=df_chart['MACD_hist'], name="MACD Hist"), row=cur_row, col=1)
 
         fig.update_layout(height=700, showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig, use_container_width=True)
@@ -315,33 +343,39 @@ with tab_fin:
     st.header(f"{symbol_short} — Financials (Yahoo)")
     t = yf.Ticker(symbol)
     try:
-        fin = t.financials
-        bs = t.balance_sheet
-        cf = t.cashflow
+        fin = t.financials.transpose() if hasattr(t, "financials") else pd.DataFrame()
+        bs = t.balance_sheet.transpose() if hasattr(t, "balance_sheet") else pd.DataFrame()
+        cf = t.cashflow.transpose() if hasattr(t, "cashflow") else pd.DataFrame()
         if not fin.empty:
             st.subheader("Income Statement")
             st.dataframe(fin)
+        else:
+            st.info("Income statement not available.")
         if not bs.empty:
             st.subheader("Balance Sheet")
             st.dataframe(bs)
+        else:
+            st.info("Balance sheet not available.")
         if not cf.empty:
             st.subheader("Cash Flow")
             st.dataframe(cf)
+        else:
+            st.info("Cashflow not available.")
     except Exception:
         st.info("Financial statements not available for this ticker.")
 
-# Technicals tab
+# Technicals
 with tab_tech:
     st.header(f"{symbol_short} — Technical Indicators")
     if df.empty:
         st.info("No price data to compute technicals.")
     else:
         last = df.iloc[-1]
-        cols = st.columns(4)
-        cols[0].metric("Close", f"{last['Close']:.2f}")
-        cols[1].metric("SMA20", f"{last.get('SMA20', np.nan):.2f}")
-        cols[2].metric("RSI(14)", f"{last.get('RSI14', np.nan):.2f}")
-        cols[3].metric("MACD", f"{last.get('MACD', np.nan):.4f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Close", f"{last['Close']:.2f}")
+        c2.metric("SMA20", f"{last.get('SMA20', np.nan):.2f}")
+        c3.metric("RSI(14)", f"{last.get('RSI14', np.nan):.2f}")
+        c4.metric("MACD", f"{last.get('MACD', np.nan):.4f}")
         st.subheader("Recent Indicators (table)")
         showcols = [c for c in ["Date", "Close", "SMA20", "SMA50", "EMA20", "EMA50", "RSI14", "MACD", "MACD_signal", "MACD_hist"] if c in df.columns]
         st.dataframe(df[showcols].tail(100), use_container_width=True)
@@ -354,21 +388,7 @@ with tab_news:
         st.info("No news currently available.")
     else:
         for n in news[:20]:
-            title = n.get("title") or n.get("title")
-            link = n.get("link")
-            pub = n.get("time")
+            title = n.get("title") or "No title"
+            link = n.get("link") or ""
+            pub = n.get("time") or ""
             st.markdown(f"- [{title}]({link})  \n  _{pub}_")
-
-# -------------------------
-# Utilities
-# -------------------------
-def human_readable(n):
-    try:
-        n = float(n)
-    except Exception:
-        return n
-    for unit in ["", "K", "M", "B", "T"]:
-        if abs(n) < 1000.0:
-            return f"{n:3.2f}{unit}"
-        n /= 1000.0
-    return f"{n:.2f}P"
