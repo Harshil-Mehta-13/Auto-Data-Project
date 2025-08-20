@@ -1,119 +1,131 @@
+# app.py
+import io
+from datetime import datetime, timedelta
+
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import yfinance as yf
 import requests
-import plotly.graph_objs as go
 from bs4 import BeautifulSoup
 
-# --------------------------
-# Fetch Nifty 500 tickers
-# --------------------------
-@st.cache_data
+# -------------------------
+# Helpers / Data fetchers
+# -------------------------
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+@st.cache_data(ttl=60 * 60 * 24)  # refresh daily
 def get_nifty500_tickers():
-    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-    df = pd.read_csv(url)
-    tickers = df["Symbol"].tolist()
-    return [ticker + ".NS" for ticker in tickers]
-
-nifty_500_stocks = get_nifty500_tickers()
-
-# --------------------------
-# Fetch financials
-# --------------------------
-def get_financials(ticker):
-    stock = yf.Ticker(ticker)
+    """
+    Try NSE official CSV first, fallback to Wikipedia parsing, then to a small builtin list.
+    Returns list of tickers *with* .NS suffix (for yfinance).
+    """
+    # 1) official CSV
+    csv_url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
-        financials = stock.financials
-        return financials
-    except:
+        resp = requests.get(csv_url, headers=HEADERS, timeout=8)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        # common column name 'Symbol'
+        if any(col.lower() == "symbol" for col in df.columns):
+            # Find 'Symbol' case-insensitively
+            sym_col = next(c for c in df.columns if c.lower() == "symbol")
+            syms = df[sym_col].dropna().astype(str).str.strip().tolist()
+            syms = [s + ("" if s.endswith(".NS") else ".NS") for s in syms if s]
+            if syms:
+                return syms
+    except Exception:
+        # ignore and fallback
+        pass
+
+    # 2) Try Wikipedia table (less official but often works)
+    try:
+        wiki = "https://en.wikipedia.org/wiki/NIFTY_500"
+        tables = pd.read_html(wiki)
+        if tables:
+            # pick the largest table (most rows)
+            df = max(tables, key=lambda t: t.shape[0])
+            cols = [str(c).strip().lower() for c in df.columns]
+            # look for likely column
+            for candidate in ("symbol", "ticker", "ticker symbol", "code", "scrip"):
+                if candidate in cols:
+                    sym_col = df.columns[cols.index(candidate)]
+                    syms = df[sym_col].dropna().astype(str).str.strip().tolist()
+                    syms = [s + ("" if s.endswith(".NS") else ".NS") for s in syms if s]
+                    if syms:
+                        return syms
+    except Exception:
+        pass
+
+    # 3) fallback small list
+    fallback = [
+        "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
+        "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS"
+    ]
+    return fallback
+
+
+@st.cache_data(ttl=60 * 5)
+def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+    """Download price history, normalize columns, return dataframe with standard OHLCV columns."""
+    try:
+        df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, threads=False)
+        # sometimes empty or MultiIndex columns — normalize
+        if df is None or df.empty:
+            # try ticker.history fallback
+            t = yf.Ticker(symbol)
+            df = t.history(period=period, interval=interval)
+            if df is None or df.empty:
+                return pd.DataFrame()
+        # flatten multiindex columns if any
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [" ".join([str(x) for x in col if x is not None]).strip() for col in df.columns.values]
+        # normalize names to standard ones
+        cols_map = {}
+        for c in df.columns:
+            cl = str(c).lower()
+            if "open" in cl and "adj" not in cl:
+                cols_map[c] = "Open"
+            elif "high" in cl:
+                cols_map[c] = "High"
+            elif "low" in cl and "adj" not in cl:
+                cols_map[c] = "Low"
+            elif "adj" in cl and "close" in cl:
+                cols_map[c] = "Adj Close"
+            elif "close" in cl:
+                cols_map[c] = "Close"
+            elif "volume" in cl:
+                cols_map[c] = "Volume"
+            else:
+                cols_map[c] = c
+        df = df.rename(columns=cols_map)
+        # ensure required columns exist
+        for req in ("Open", "High", "Low", "Close"):
+            if req not in df.columns:
+                return pd.DataFrame()
+        df = df.reset_index()
+        # ensure datetime index column name 'Date' or 'ts'
+        return df
+    except Exception:
         return pd.DataFrame()
 
-# --------------------------
-# Fetch technical indicators
-# --------------------------
-def get_technicals(df):
-    df["SMA20"] = df["Close"].rolling(window=20).mean()
-    df["SMA50"] = df["Close"].rolling(window=50).mean()
-    df["RSI"] = compute_rsi(df["Close"])
-    return df
 
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-# --------------------------
-# Fetch news from Yahoo Finance
-# --------------------------
-def get_news(ticker):
-    url = f"https://finance.yahoo.com/quote/{ticker}?p={ticker}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    news_items = []
-    for item in soup.find_all("h3", {"class": "Mb(5px)"}):
-        title = item.get_text()
-        link = item.find("a")["href"]
-        if not link.startswith("http"):
-            link = "https://finance.yahoo.com" + link
-        news_items.append((title, link))
-
-    return news_items[:5]
-
-# --------------------------
-# Streamlit UI
-# --------------------------
-st.set_page_config(page_title="NSE Stock Dashboard", layout="wide")
-
-st.title("📈 Nifty 500 Stock Dashboard")
-
-# Dropdown to select stock
-selected_stock = st.selectbox("Select a stock:", nifty_500_stocks)
-
-# Fetch stock data
-stock_data = yf.download(selected_stock, period="6mo", interval="1d")
-stock_data = get_technicals(stock_data)
-
-# --------------------------
-# Chart
-# --------------------------
-st.subheader("📊 Price Chart")
-fig = go.Figure(data=[go.Candlestick(
-    x=stock_data.index,
-    open=stock_data["Open"],
-    high=stock_data["High"],
-    low=stock_data["Low"],
-    close=stock_data["Close"],
-    name="Candlesticks"
-)])
-fig.add_trace(go.Scatter(x=stock_data.index, y=stock_data["SMA20"], mode="lines", name="SMA20"))
-fig.add_trace(go.Scatter(x=stock_data.index, y=stock_data["SMA50"], mode="lines", name="SMA50"))
-st.plotly_chart(fig, use_container_width=True)
-
-# --------------------------
-# Financials
-# --------------------------
-st.subheader("📑 Financials")
-financials = get_financials(selected_stock)
-if not financials.empty:
-    st.dataframe(financials)
-else:
-    st.write("No financial data available.")
-
-# --------------------------
-# Technical Indicators
-# --------------------------
-st.subheader("📐 Technicals")
-st.line_chart(stock_data[["Close", "SMA20", "SMA50"]])
-st.line_chart(stock_data[["RSI"]])
-
-# --------------------------
-# News
-# --------------------------
-st.subheader("📰 Latest News")
-news = get_news(selected_stock.replace(".NS", ""))
-for title, link in news:
-    st.markdown(f"- [{title}]({link})")
+@st.cache_data(ttl=60 * 60)
+def fetch_company_info(symbol: str) -> dict:
+    """Return Ticker.info with safe fallback."""
+    try:
+        t = yf.Ticker(symbol)
+        info = {}
+        try:
+            info = t.get_info() if hasattr(t, "get_info") else t.info
+        except Exception:
+            # older yfinance exposes .info
+            info = getattr(t, "info", {}) or {}
+        # some quick important fields (safe)
+        quick = {
+            "shortName": info.get("shortName") or info.get("longName"),
+            "currency": info.get("currency"),
+            "exchange": info.get("exchange"),
+            "marketCap": info.get("ma
