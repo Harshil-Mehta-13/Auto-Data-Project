@@ -1,113 +1,59 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 
-# -------------------------------------------
-# Fetch Nifty 500 stock tickers
-# -------------------------------------------
+# -------------------------------
+# Function to get Nifty 500 stocks
+# -------------------------------
 @st.cache_data
 def get_nifty500_stocks():
     url = "https://en.wikipedia.org/wiki/NIFTY_500"
-    tables = pd.read_html(url)
-    df = tables[1]  # The NIFTY 500 table is usually the second table
+    try:
+        tables = pd.read_html(url)
+        if not tables:
+            st.error("No tables found on Wikipedia page.")
+            return pd.DataFrame()
 
-    # Standardize column names
-    df.columns = [c.strip().lower() for c in df.columns]
+        # Pick the largest table (usually the stock list)
+        df = max(tables, key=lambda t: t.shape[0])
 
-    # Try common column names for ticker
-    possible_cols = ["symbol", "ticker", "ticker symbol"]
-    col = None
-    for c in possible_cols:
-        if c in df.columns:
-            col = c
-            break
+        # Clean column names
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-    if col is None:
-        st.error("Could not find ticker column in NIFTY 500 table.")
-        return []
+        return df
 
-    return df[col].dropna().astype(str).tolist()
+    except Exception as e:
+        st.error(f"Error fetching Nifty 500 stocks: {e}")
+        return pd.DataFrame()
+
+# -------------------------------
+# Streamlit App Layout
+# -------------------------------
+st.set_page_config(page_title="Nifty 500 Screener", layout="wide")
+
+st.title("📊 Nifty 500 Stock Screener")
 
 nifty_500_stocks = get_nifty500_stocks()
 
-# -------------------------------------------
-# App Layout
-# -------------------------------------------
-st.set_page_config(page_title="Stock Analysis App", layout="wide")
-st.title("📈 Nifty 500 Stock Analysis Dashboard")
+if not nifty_500_stocks.empty:
+    st.success(f"Fetched {len(nifty_500_stocks)} stocks successfully ✅")
 
-# Sidebar for stock selection
-stock = st.sidebar.selectbox("Select a Stock", nifty_500_stocks)
+    st.dataframe(nifty_500_stocks.head(20))  # Show top 20 as preview
 
-# Download stock data
-ticker = yf.Ticker(stock + ".NS") if not stock.endswith(".NS") else yf.Ticker(stock)
+    # Optional: Add filters
+    all_columns = nifty_500_stocks.columns.tolist()
+    st.sidebar.subheader("🔍 Filters")
 
-# -------------------------------------------
-# Stock Price Chart
-# -------------------------------------------
-st.subheader(f"Stock Price - {stock}")
-period = st.selectbox("Select Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
-interval = st.selectbox("Select Interval", ["1d", "1wk", "1mo"], index=0)
+    if all_columns:
+        col_to_filter = st.sidebar.selectbox("Select column to filter", all_columns)
+        filter_text = st.sidebar.text_input("Enter filter text")
 
-data = ticker.history(period=period, interval=interval)
-st.line_chart(data['Close'])
+        if filter_text:
+            filtered_df = nifty_500_stocks[
+                nifty_500_stocks[col_to_filter].astype(str).str.contains(filter_text, case=False, na=False)
+            ]
+            st.dataframe(filtered_df)
+        else:
+            st.dataframe(nifty_500_stocks)
 
-# -------------------------------------------
-# Company Financials
-# -------------------------------------------
-st.subheader("📊 Company Financials")
-try:
-    fin = ticker.financials
-    bs = ticker.balance_sheet
-    cf = ticker.cashflow
-    st.write("### Income Statement")
-    st.dataframe(fin)
-    st.write("### Balance Sheet")
-    st.dataframe(bs)
-    st.write("### Cash Flow")
-    st.dataframe(cf)
-except Exception as e:
-    st.warning("Financial data not available.")
-
-# -------------------------------------------
-# Technical Indicators
-# -------------------------------------------
-st.subheader("📈 Technical Analysis")
-
-def calculate_technical_indicators(data):
-    df = data.copy()
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
-    df['SMA50'] = df['Close'].rolling(window=50).mean()
-    df['RSI'] = 100 - (100 / (1 + df['Close'].pct_change().rolling(14).apply(
-        lambda x: (x[x > 0].mean() / (-x[x < 0].mean())) if (-x[x < 0].mean()) != 0 else 0)))
-    return df
-
-data_ta = calculate_technical_indicators(data)
-st.line_chart(data_ta[['Close', 'SMA20', 'SMA50']])
-st.write("Latest RSI:", round(data_ta['RSI'].iloc[-1], 2))
-
-# -------------------------------------------
-# News Section (Free Source)
-# -------------------------------------------
-st.subheader("📰 Latest News")
-
-def get_news(query):
-    url = f"https://news.google.com/rss/search?q={query}+stock+India"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.content, "xml")
-    items = soup.find_all("item")[:5]
-    news_list = []
-    for item in items:
-        news_list.append({
-            "title": item.title.text,
-            "link": item.link.text,
-            "pubDate": item.pubDate.text
-        })
-    return news_list
-
-news = get_news(stock)
-for n in news:
-    st.markdown(f"- [{n['title']}]({n['link']}) ({n['pubDate']})")
+else:
+    st.error("⚠️ Could not fetch Nifty 500 stocks. Please check Wikipedia table structure.")
