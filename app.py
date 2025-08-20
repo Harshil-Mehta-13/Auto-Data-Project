@@ -1,198 +1,92 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import plotly.graph_objs as go
 
-# -------------------------------
-# Helper functions
-# -------------------------------
+# Load full Nifty 500 tickers from CSV (replace with your file)
+nifty500 = pd.read_csv("nifty500.csv")  # should have a column 'Symbol'
+tickers = [f"{s}.NS" for s in nifty500['Symbol']]
 
-def get_news(ticker):
-    """Fetch latest news using Yahoo Finance API (fallback to simple HTML links)."""
-    try:
-        stock = yf.Ticker(ticker)
-        news_items = stock.news[:6] if hasattr(stock, "news") else []
-        return news_items
-    except:
-        return []
+# Sidebar for ticker selection
+st.sidebar.header("📈 Nifty 500 Dashboard")
+selected_ticker = st.sidebar.selectbox("Select Company", tickers)
 
-def human_readable(num):
-    if num is None: return "—"
-    for unit in ["", "K", "M", "B", "T"]:
-        if abs(num) < 1000.0:
-            return f"{num:3.1f}{unit}"
-        num /= 1000.0
-    return f"{num:.1f}T"
+# Download data
+@st.cache_data
+def load_data(ticker):
+    data = yf.download(ticker, period="1y", interval="1d")
+    info = yf.Ticker(ticker).info
+    return data, info
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
-st.set_page_config(page_title="Stock Monitoring Platform", layout="wide")
+data, info = load_data(selected_ticker)
 
-# Apple-like clean style
-st.markdown(
-    """
-    <style>
-    .title {
-        text-align: center;
-        font-size: 40px;
-        font-weight: 700;
-        margin-top: 10px;
-        margin-bottom: 5px;
-    }
-    .subtitle {
-        text-align: center;
-        font-size: 18px;
-        color: #666;
-        margin-bottom: 20px;
-    }
-    .stSelectbox, .stRadio {
-        margin: auto;
-        max-width: 400px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# Tabs like TradingView
+page = st.sidebar.radio("Navigate", ["Overview", "Financials", "Charts", "News"])
 
-st.markdown("<div class='title'>📊 Stock Monitoring Platform</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Track Financials • Technicals • News</div>", unsafe_allow_html=True)
+# ----------------- Overview -----------------
+if page == "Overview":
+    st.title(f"{info.get('longName', selected_ticker)} ({selected_ticker})")
 
-# Example: Nifty 500 tickers (partial list for demo)
-nifty500 = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "HINDUNILVR.NS"]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Current Price", f"₹{info.get('currentPrice', 'N/A')}")
+    col2.metric("Market Cap", f"₹{info.get('marketCap', 'N/A'):,}")
+    col3.metric("P/E Ratio", info.get('trailingPE', 'N/A'))
 
-col1, col2 = st.columns([2,3])
-with col1:
-    ticker = st.selectbox("Select Stock:", nifty500)
-with col2:
-    section = st.radio("Select Section:", ["Overview", "Financials", "Technicals", "News"], horizontal=True)
+    st.subheader("About")
+    st.write(info.get("longBusinessSummary", "No company summary available."))
 
-stock = yf.Ticker(ticker)
-info = stock.info
+# ----------------- Financials -----------------
+elif page == "Financials":
+    st.title("📊 Financials")
 
-# -------------------------------
-# Company Header
-# -------------------------------
-col1, col2 = st.columns([1,4])
-with col1:
-    if "logo_url" in info and info["logo_url"]:
-        st.image(info["logo_url"], width=80)
-with col2:
-    st.subheader(info.get("shortName", ticker))
+    # Income statement (last few years)
+    ticker_obj = yf.Ticker(selected_ticker)
+    fin = ticker_obj.financials
 
-# KPIs
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Market Cap", human_readable(info.get("marketCap")))
-col2.metric("P/E Ratio", round(info.get("trailingPE", 0), 2))
-col3.metric("Dividend Yield", f"{round(info.get('dividendYield',0)*100,2)}%")
-col4.metric("Beta", round(info.get("beta", 0), 2))
+    if fin is not None and not fin.empty:
+        st.write("### Income Statement")
+        st.dataframe(fin)
 
-# -------------------------------
-# Overview Section
-# -------------------------------
-if section == "Overview":
-    st.subheader("📈 Stock Price History")
-    hist = stock.history(period="1y")
-    hist = hist[hist.index.dayofweek < 5]  # drop weekends
+        # Plot revenue & net income trends
+        if "Total Revenue" in fin.index and "Net Income" in fin.index:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=fin.columns, y=fin.loc["Total Revenue"], name="Revenue"))
+            fig.add_trace(go.Bar(x=fin.columns, y=fin.loc["Net Income"], name="Net Income"))
+            fig.update_layout(barmode="group", template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Financial data not available for this company.")
 
-    fig = go.Figure(data=[go.Candlestick(
-        x=hist.index,
-        open=hist["Open"], high=hist["High"],
-        low=hist["Low"], close=hist["Close"],
-        name="Price"
-    )])
-    fig.update_layout(template="plotly_white", height=500, margin=dict(l=30,r=30,t=30,b=30))
+# ----------------- Charts -----------------
+elif page == "Charts":
+    st.title("📉 Charts")
+
+    fig = go.Figure()
+
+    # Candlestick chart
+    fig.add_trace(go.Candlestick(
+        x=data.index,
+        open=data['Open'],
+        high=data['High'],
+        low=data['Low'],
+        close=data['Close'],
+        name='Price'
+    ))
+
+    # Add volume bar chart
+    fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume', opacity=0.3, marker_color='blue'))
+
+    fig.update_layout(
+        title=f"{selected_ticker} Stock Price",
+        yaxis_title="Price (₹)",
+        xaxis_title="Date",
+        xaxis_rangeslider_visible=False,
+        template="plotly_white"
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------------
-# Financials Section
-# -------------------------------
-elif section == "Financials":
-    st.subheader("💰 Financial Performance")
-
-    fin = stock.financials.T
-    if not fin.empty:
-        st.write("### Income Statement (Visualized)")
-        fig = go.Figure()
-        if "Total Revenue" in fin.columns:
-            fig.add_trace(go.Bar(x=fin.index, y=fin["Total Revenue"], name="Revenue", marker_color="steelblue"))
-        if "Net Income" in fin.columns:
-            fig.add_trace(go.Bar(x=fin.index, y=fin["Net Income"], name="Net Income", marker_color="seagreen"))
-        fig.update_layout(barmode="group", template="plotly_white")
-        st.plotly_chart(fig, use_container_width=True)
-
-    bal = stock.balance_sheet.T
-    if not bal.empty:
-        st.write("### Balance Sheet Highlights")
-        fig_bal = go.Figure()
-        if "Total Assets" in bal.columns:
-            fig_bal.add_trace(go.Scatter(x=bal.index, y=bal["Total Assets"], name="Total Assets", line=dict(color="blue")))
-        if "Total Liab" in bal.columns:
-            fig_bal.add_trace(go.Scatter(x=bal.index, y=bal["Total Liab"], name="Total Liabilities", line=dict(color="red")))
-        fig_bal.update_layout(template="plotly_white")
-        st.plotly_chart(fig_bal, use_container_width=True)
-
-    cf = stock.cashflow.T
-    if not cf.empty:
-        st.write("### Cashflow Trends")
-        fig_cf = go.Figure()
-        if "Total Cash From Operating Activities" in cf.columns:
-            fig_cf.add_trace(go.Bar(x=cf.index, y=cf["Total Cash From Operating Activities"], name="Operating CF"))
-        if "Capital Expenditures" in cf.columns:
-            fig_cf.add_trace(go.Bar(x=cf.index, y=cf["Capital Expenditures"], name="CapEx"))
-        fig_cf.update_layout(barmode="group", template="plotly_white")
-        st.plotly_chart(fig_cf, use_container_width=True)
-
-# -------------------------------
-# Technicals Section
-# -------------------------------
-elif section == "Technicals":
-    st.subheader("📊 Technical Indicators")
-    hist = stock.history(period="1y")
-    hist = hist[hist.index.dayofweek < 5]
-
-    # SMA/EMA
-    hist["SMA20"] = hist["Close"].rolling(20).mean()
-    hist["EMA50"] = hist["Close"].ewm(span=50).mean()
-
-    fig_ta = go.Figure()
-    fig_ta.add_trace(go.Scatter(x=hist.index, y=hist["Close"], name="Close", line=dict(color="black")))
-    fig_ta.add_trace(go.Scatter(x=hist.index, y=hist["SMA20"], name="SMA20", line=dict(color="blue", dash="dot")))
-    fig_ta.add_trace(go.Scatter(x=hist.index, y=hist["EMA50"], name="EMA50", line=dict(color="red", dash="dash")))
-    fig_ta.update_layout(template="plotly_white")
-    st.plotly_chart(fig_ta, use_container_width=True)
-
-    # RSI
-    delta = hist["Close"].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    hist["RSI"] = 100 - (100 / (1 + rs))
-
-    fig_rsi = go.Figure()
-    fig_rsi.add_trace(go.Scatter(x=hist.index, y=hist["RSI"], name="RSI", line=dict(color="purple")))
-    fig_rsi.add_hline(y=70, line_dash="dot", line_color="red")
-    fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
-    fig_rsi.update_layout(template="plotly_white", height=300)
-    st.plotly_chart(fig_rsi, use_container_width=True)
-
-# -------------------------------
-# News Section
-# -------------------------------
-elif section == "News":
-    st.subheader("📰 Latest News")
-    news_items = get_news(ticker)
-    if news_items:
-        for item in news_items:
-            col1, col2 = st.columns([1,5])
-            with col1:
-                if "thumbnail" in item and "resolutions" in item["thumbnail"]:
-                    img = item["thumbnail"]["resolutions"][0]["url"]
-                    st.image(img, width=100)
-            with col2:
-                st.markdown(f"**[{item['title']}]({item['link']})**")
-                st.caption(item.get("publisher", ""))
-    else:
-        st.info("No news available.")
+# ----------------- News -----------------
+elif page == "News":
+    st.title("📰 News")
+    st.info("News integration (e.g., Google News API) can be added here.")
